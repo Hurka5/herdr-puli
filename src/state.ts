@@ -15,9 +15,16 @@
  *                      --no-ext-diff`, capped at 256 KiB with a
  *                      truncation trailer) — the review panel renders
  *                      exactly what approval will commit.
+ *                      A push proposal (kind: "push", remote set, empty
+ *                      files/patch) rides the same queue; the panel
+ *                      shows its push line instead of a diff.
  *   verdict.json       transient human answer, written by the herdr
  *                      panel or the `puli` CLI:
- *                      { id, decision: "approve" | "reject", message?, at? }
+ *                      { id, decision: "approve" | "reject", message?,
+ *                        comments?: [{ file, start, end, text }], at? }
+ *                      `comments` (reject only) are inline line comments
+ *                      picked on the panel's inline diff: an inclusive
+ *                      NEW-side line range per repo-relative file.
  *
  * A verdict only counts for the waiter whose pending id it matches;
  * that waiter consumes (deletes) it. Any other waiter must leave it
@@ -41,6 +48,10 @@ export type Proposal = {
   id: string
   repo: string
   branch: string
+  /** "push" marks a push proposal (push_request); absent = commit proposal. */
+  kind?: "push"
+  /** Push proposals only: the remote the branch would be pushed to. */
+  remote?: string
   message: string
   stat: string
   /** Staged paths at proposal time (`git diff --cached --name-only`). */
@@ -60,7 +71,18 @@ export type Verdict = {
   id: string
   decision: "approve" | "reject"
   message?: string
+  /** Inline line comments (reject only, written by the review panel). */
+  comments?: LineComment[]
   at?: string
+}
+
+/** One inline comment on a rejected diff: an inclusive new-side line range. */
+export type LineComment = {
+  /** Repo-relative path. */
+  file: string
+  start: number
+  end: number
+  text: string
 }
 
 export const stateDir = path.join(homedir(), ".local", "state", "puli")
@@ -135,20 +157,38 @@ export function readVerdict(): Promise<unknown> {
   return readJson<unknown>(verdictPath)
 }
 
+/** A valid comment item, or null (callers skip invalid items). */
+function parseComment(raw: unknown): LineComment | null {
+  if (typeof raw !== "object" || raw === null) return null
+  const c = raw as Record<string, unknown>
+  if (typeof c.file !== "string" || c.file.trim() === "") return null
+  if (typeof c.start !== "number" || !Number.isFinite(c.start)) return null
+  if (typeof c.end !== "number" || !Number.isFinite(c.end)) return null
+  if (typeof c.text !== "string" || c.text.trim() === "") return null
+  return { file: c.file, start: c.start, end: c.end, text: c.text }
+}
+
 /**
  * Validate a parsed verdict file. Anything without a string id and an
  * "approve" | "reject" decision is malformed → null (callers must
- * ignore it, not delete it).
+ * ignore it, not delete it). `comments` items are validated one by one;
+ * invalid items are skipped, an empty remainder drops the field.
  */
 export function parseVerdict(raw: unknown): Verdict | null {
   if (typeof raw !== "object" || raw === null) return null
   const v = raw as Record<string, unknown>
   if (typeof v.id !== "string" || v.id === "") return null
   if (v.decision !== "approve" && v.decision !== "reject") return null
+  const comments = Array.isArray(v.comments)
+    ? (v.comments as unknown[])
+        .map(parseComment)
+        .filter((c): c is LineComment => c !== null)
+    : []
   return {
     id: v.id,
     decision: v.decision,
     ...(typeof v.message === "string" && v.message.trim() !== "" ? { message: v.message } : {}),
+    ...(comments.length > 0 ? { comments } : {}),
     ...(typeof v.at === "string" ? { at: v.at } : {}),
   }
 }

@@ -11,10 +11,14 @@ approve, reject, or comment on them in the **Commits** panel.
 - `commit_request` tool for OpenCode agents: stages the files, snapshots
   the diff, and waits for your verdict (default 30 min, then it gives up
   and tells the agent).
-- **Commits panel** in the Herdr app (the tab next to Files and Changes):
-  a queue of proposals, each a card with the full commit message and the
-  changed files. Click a file to expand its color-coded diff. Approve or
-  Reject with a comment, directly on the card.
+- `push_request` tool: the same gate for `git push` — shows what would be
+  pushed, pushes only after approval.
+- **Commits panel** in the Herdr app: a queue of proposals, each a card
+  with the full commit message and the changed files. Click a file to
+  expand its Zed-style diff (new code tinted, hover the red markers to
+  see what was removed). Click diff lines to comment on them — comments
+  go back to the agent as `file:line-range` references. Approve or
+  Reject directly on the card.
 - History of settled proposals: approved (with hash), rejected (with your
   comment), timed out.
 - `puli` CLI with the same powers from any terminal:
@@ -72,11 +76,12 @@ installer prints this block too):
 
 ## Agent usage
 
-Agents never run `git commit` (denied). They stage, write the message,
-and call:
+Agents never run `git commit` or `git push` (denied). They stage, write
+the message, and call:
 
 ```
-commit_request({ message, files?, repo?, timeoutMs? })
+commit_request({ message, files?, repo?, timeoutMs? })   # commit
+push_request({ repo?, remote?, branch?, timeoutMs? })    # push
 ```
 
 The installed commit-gate skill teaches every OpenCode session this flow.

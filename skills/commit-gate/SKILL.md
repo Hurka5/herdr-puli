@@ -15,6 +15,10 @@ To commit:
 3. Call the `commit_request` tool with `message` (and `files` if you want it
    to stage for you).
 
+To push (`git push` is denied too): call the `push_request` tool (defaults:
+current branch → origin). The human approves it in the Commits panel like a
+commit; on approval the tool pushes and returns the pushed refs.
+
 The human reviews the diff in the herdr app's Changes panel and answers in a
 terminal — `puli approve` or `puli reject -m "comment"` — and your tool call
 returns when they do:
@@ -26,5 +30,6 @@ returns when they do:
   pending and ask them directly.
 
 Never attempt workarounds: no `--no-verify`, no plumbing commands, no
-committing via another tool or from another directory. If `commit_request`
-is unavailable, say so to the user instead of improvising.
+committing or pushing via another tool or from another directory. If
+`commit_request` / `push_request` is unavailable, say so to the user instead
+of improvising.

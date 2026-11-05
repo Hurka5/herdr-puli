@@ -13,11 +13,16 @@
  *                      renders it, so the panel is self-sufficient: exactly
  *                      what approval will commit, without opening anything
  *                      else.
- *   verdict.json       { id, decision: "approve" | "reject", message? } —
- *                      transient; written by `puli approve | puli reject -m`
- *                      or this panel; counts only when its id matches a
- *                      pending proposal. The plugin consumes it and deletes
- *                      that proposal's pending/<id>.json.
+ *   verdict.json       { id, decision: "approve" | "reject", message?,
+ *                        comments?: [{ file, start, end, text }] } —
+ *                        transient; written by `puli approve | puli reject -m`
+ *                        or this panel. A reject may carry `comments`:
+ *                        inline line comments picked by clicking lines of
+ *                        the card's inline diff (per repo-relative file,
+ *                        an inclusive NEW-side line range). Counts only
+ *                        when its id matches a pending proposal. The
+ *                        plugin consumes it and deletes that proposal's
+ *                        pending/<id>.json.
  *   history.jsonl      one JSON object per settled proposal (append-only):
  *                      { id, subject, repo, branch, decision: "approve" |
  *                      "reject" | "timeout" | "abort", detail?, at } —
@@ -101,11 +106,16 @@ function age(iso) {
   return Math.round(s / 86400) + "d ago";
 }
 
-/** Verdict JSON in puli's own shape: 2-space indent + trailing newline. */
-function verdictText(id, decision, message) {
+/** Verdict JSON in puli's own shape: 2-space indent + trailing newline.
+ *  `comments` (reject only — approves drop them) are the card's picked
+ *  line comments. */
+function verdictText(id, decision, message, comments) {
   const v = { id, decision };
   const c = (message ?? "").trim();
   if (c) v.message = c;
+  if (decision === "reject" && Array.isArray(comments) && comments.length > 0) {
+    v.comments = comments.map((k) => ({ file: k.file, start: k.start, end: k.end, text: k.text }));
+  }
   return JSON.stringify(v, null, 2) + "\n";
 }
 
@@ -195,14 +205,19 @@ function capLine(raw) {
  * Parse a frozen patch into per-file sections:
  *   { name, status: "" | "new" | "deleted" | "binary" | "meta",
  *     add, del, truncated, rows: [row] }
- * Row shapes (the AFTER state; removed lines live in `removed` groups):
- *   { t: "hunk", s, removed?: string[] }  @@ header (also inherits a
- *                                         trailing removal group of the
- *                                         previous hunk, if any)
- *   { t: "add", s, removed?: string[] }   '+ line' — next surviving line
- *   { t: "ctx", s, removed?: string[] }   context line
- *   { t: "tail", s: "", removed: [] }     standalone end-of-section row
- *                                         for a group with no survivor
+ * Row shapes (the AFTER state; removed lines live in `removed` groups).
+ *   `line` is the NEW-side line number of an after-row (context and add
+ *   rows each consume one, counting from the @@ header's +c value); rows
+ *   with no new-side number (hunk, note, tail, "\ No newline") carry
+ *   null — only rows with a number are selectable for line comments.
+ *   { t: "hunk", s, line: null, removed?: string[] }  @@ header (also
+ *                                         inherits a trailing removal
+ *                                         group of the previous hunk)
+ *   { t: "add", s, line: number | null, removed?: string[] }  '+ line'
+ *   { t: "ctx", s, line: number | null, removed?: string[] }  context
+ *   { t: "tail", s: "", line: null, removed: string[] }  standalone
+ *                                         end-of-section row for a group
+ *                                         with no survivor
  * Empty/missing/non-string patch → []. Malformed input degrades to
  * whatever sections could be recovered — never throws (render is pure).
  */
@@ -215,7 +230,7 @@ function parsePatch(patchText) {
       if (cur.pending.length > 0) {
         // a removal group with no following line anywhere in the section
         // (deletion at end of file) rides a standalone dim row
-        cur.rows.push({ t: "tail", s: "", removed: cur.pending });
+        cur.rows.push({ t: "tail", s: "", line: null, removed: cur.pending });
         cur.pending = [];
       }
       files.push(cur);
@@ -235,6 +250,7 @@ function parsePatch(patchText) {
         truncated: false,
         rows: [],
         pending: [], // removal group waiting for its next rendered row
+        line: null,  // next NEW-side line number (set by each @@ header)
       };
       continue;
     }
@@ -255,7 +271,7 @@ function parsePatch(patchText) {
     if (cur.status === "binary") continue; // binary payload: not for humans
     if (raw.startsWith("... (patch truncated")) {
       cur.truncated = true;
-      cur.rows.push({ t: "note", s: raw });
+      cur.rows.push({ t: "note", s: raw, line: null });
       continue;
     }
     if (raw.startsWith("@@")) {
@@ -263,7 +279,11 @@ function parsePatch(patchText) {
       // header row (the hunk-header fallback)
       const take = cur.pending;
       cur.pending = [];
-      cur.rows.push(take.length ? { t: "hunk", s: capLine(raw), removed: take } : { t: "hunk", s: capLine(raw) });
+      // ...and the new-side counter restarts at the header's +<start>
+      const h = /^@@ -\d+(?:,\d+)? \+(\d+)/.exec(raw);
+      if (h) cur.line = parseInt(h[1], 10);
+      cur.rows.push(take.length ? { t: "hunk", s: capLine(raw), line: null, removed: take }
+        : { t: "hunk", s: capLine(raw), line: null });
       continue;
     }
     if (raw.startsWith("-")) { // removed: NOT rendered inline (hover shows it)
@@ -275,7 +295,10 @@ function parsePatch(patchText) {
       cur.add += 1;
       const take = cur.pending;
       cur.pending = [];
-      cur.rows.push(take.length ? { t: "add", s: capLine(raw), removed: take } : { t: "add", s: capLine(raw) });
+      const line = cur.line; // this after-row's NEW-side number, if any
+      if (line !== null) cur.line = line + 1;
+      cur.rows.push(take.length ? { t: "add", s: capLine(raw), line, removed: take }
+        : { t: "add", s: capLine(raw), line });
       continue;
     }
     if (raw.startsWith(" ") || raw.startsWith("\\")) {
@@ -285,17 +308,29 @@ function parsePatch(patchText) {
       }
       const take = cur.pending;
       cur.pending = [];
-      cur.rows.push(take.length ? { t: "ctx", s: capLine(raw), removed: take } : { t: "ctx", s: capLine(raw) });
+      if (raw.startsWith("\\")) {
+        // "\ No newline…" of a surviving line: not a line itself
+        cur.rows.push(take.length ? { t: "ctx", s: capLine(raw), line: null, removed: take }
+          : { t: "ctx", s: capLine(raw), line: null });
+        continue;
+      }
+      const line = cur.line;
+      if (line !== null) cur.line = line + 1;
+      cur.rows.push(take.length ? { t: "ctx", s: capLine(raw), line, removed: take }
+        : { t: "ctx", s: capLine(raw), line });
       continue;
     }
     // anything else inside a section: treat as context
-    cur.rows.push({ t: "ctx", s: capLine(" " + raw) });
+    const line = cur.line;
+    if (line !== null) cur.line = line + 1;
+    cur.rows.push({ t: "ctx", s: capLine(" " + raw), line });
   }
   flush();
   // A section whose only content rows are none (rename/mode-only) → meta.
   for (const f of files) {
     if (f.status === "" && f.rows.length === 0) f.status = "meta";
     delete f.pending;
+    delete f.line;
   }
   return files;
 }
@@ -399,7 +434,17 @@ export default class Puli extends View {
     this.rejectingId = null; // proposal id whose comment input is open
     this.openFiles = new Map(); // proposal id -> Set of open file names (accordion)
     this.hoveredMark = null; // marker id (id-fileIdx-rowIdx) whose removals show
+    // Line-comment state (in-memory only; nothing is written until the
+    // verdict). Selection keys are "<proposal id>\u0000<file name>" →
+    // Set of row indexes into that file section's rows.
+    this.selection = new Map(); // key -> Set(rowIdx) of selected diff rows
+    this.selAnchor = new Map(); // key -> rowIdx last clicked (shift-range start)
+    this.comments = new Map(); // proposal id -> [{file, start, end, text}]
+    this.activeCardId = null; // card lines were last picked on (Esc target)
+    this.activeSelKey = null; // key whose comment input shows
     this.sentId = null;      // id this panel wrote a verdict for (awaiting pickup)
+    this.seenVerdictKey = null; // verdict content last seen in verdict.json
+    this.seenVerdictAt = 0;  // when that content first appeared
     this.sentDecision = null;
     this.busyId = null;      // proposal id with a verdict write in flight
     this.err = null;
@@ -418,6 +463,8 @@ export default class Puli extends View {
         : this.items().find((i) => i.id === this.rejectingId) ?? null;
       if (item) cx.spawn((c) => this.decide(item, "reject", this.input.value(), c));
     });
+    this.lineInput = InputState.new({ placeholder: "line comment — Enter adds" });
+    this.lineInput.on("submit", (_e, cx) => this.addLineComment(cx));
 
     cx.timer.every(1000, (cx) => this.poll(cx));
     this.poll(cx);
@@ -483,6 +530,8 @@ export default class Puli extends View {
               id: p.id,
               repo: p.repo,
               branch: p.branch,
+              kind: p.kind === "push" ? "push" : "",
+              remote: typeof p.remote === "string" ? p.remote : "",
               message: String(p.message ?? ""),
               stat: String(p.stat ?? ""),
               files: Array.isArray(p.files) ? p.files.map((f) => String(f)) : [],
@@ -508,21 +557,26 @@ export default class Puli extends View {
       changed = true;
     }
 
-    // 2b) orphan verdict: its proposal no longer exists, so no waiter will
-    // ever consume it (plugin timed out, or test data). The plugin deletes
-    // the verdict BEFORE the pending file, so a live settle never leaves
-    // this state — anything here is genuinely orphaned. Clear it, or the
-    // single verdict slot blocks every later Approve/Reject forever.
+    // 2b) a verdict no live waiter will ever consume:
+    //   - its proposal is gone (orphan), or
+    //   - it has sat unconsumed >10 s (a live waiter polls every 500 ms, so
+    //     a real consume takes under a second; only a dead/absent waiter
+    //     leaves a verdict standing — approve on such a card must not stick)
     if (verdict && typeof verdict.id === "string") {
       const ids = new Set(this.items().map((i) => i.id));
-      if (!ids.has(verdict.id)) {
-        try {
-          await exec("sh", ["-c", 'rm -f "$1"', "puli", VERDICT]);
-        } catch { /* best effort */ }
+      const key = JSON.stringify(verdict);
+      if (!ids.has(verdict.id) || (this.seenVerdictKey === key && Date.now() - this.seenVerdictAt > 10_000)) {
+        if (this.seenVerdictKey !== key) { this.seenVerdictKey = key; this.seenVerdictAt = Date.now(); }
+        const targets = ids.has(verdict.id) ? [PENDING_DIR + "/" + verdict.id + ".json"] : [];
+        targets.push(VERDICT);
+        try { await exec("sh", ["-c", 'rm -f "$@"', "puli", ...targets]); } catch { /* best effort */ }
         if (this.sentId === verdict.id) this.sentId = null;
         this.lastVerdict = null;
         verdict = null;
         changed = true;
+      } else if (this.seenVerdictKey !== key) {
+        this.seenVerdictKey = key;
+        this.seenVerdictAt = Date.now();
       }
     }
 
@@ -570,6 +624,29 @@ export default class Puli extends View {
         this.openFiles.delete(id);
         changed = true;
       }
+    }
+    // …and its line-comment state (selection keys carry the id before \u0000)
+    for (const key of Array.from(this.selection.keys())) {
+      if (!live(key.slice(0, key.indexOf("\u0000")))) {
+        this.selection.delete(key);
+        this.selAnchor.delete(key);
+        changed = true;
+      }
+    }
+    for (const id of Array.from(this.comments.keys())) {
+      if (!live(id)) { // settled → drafted comments go with the card
+        this.comments.delete(id);
+        changed = true;
+      }
+    }
+    if (this.activeCardId !== null && !live(this.activeCardId)) {
+      this.activeCardId = null;
+      changed = true;
+    }
+    if (this.activeSelKey !== null && !this.selection.has(this.activeSelKey)) {
+      this.activeSelKey = null;
+      this.lineInput.set_value("");
+      changed = true;
     }
     // first sight of each proposal → its first file starts expanded
     for (const p of this.items()) {
@@ -642,7 +719,10 @@ export default class Puli extends View {
     this.err = null;
     this.errId = null;
     try {
-      const ok = await this.writeVerdict(verdictText(item.id, decision, comment), item.id);
+      // a reject carries the card's drafted line comments; an approve
+      // never does (comments on an approved card are simply dropped)
+      const comments = decision === "reject" ? (this.comments.get(item.id) ?? []) : undefined;
+      const ok = await this.writeVerdict(verdictText(item.id, decision, comment, comments), item.id);
       if (ok) {
         this.sentId = item.id;
         this.sentDecision = decision;
@@ -686,6 +766,88 @@ export default class Puli extends View {
     return true;
   }
 
+  // ── line selection & comments (in-memory; only the verdict is written) ──
+
+  /** Click on a diff row: toggle it, or (shift) select the range from the
+   *  last plain click to this row. Only rows with a line number take
+   *  part — hunk/note/tail rows are never selectable. */
+  rowClick(item, file, rIdx, shift, cx) {
+    const key = item.id + "\u0000" + file.name;
+    let sel = this.selection.get(key) ?? new Set();
+    const anchor = this.selAnchor.get(key);
+    if (shift && anchor !== undefined) {
+      const lo = Math.min(anchor, rIdx);
+      const hi = Math.max(anchor, rIdx);
+      for (let i = lo; i <= hi; i++) {
+        if (file.rows[i] && file.rows[i].line !== null) sel.add(i);
+      }
+    } else {
+      if (sel.has(rIdx)) sel.delete(rIdx);
+      else sel.add(rIdx);
+      this.selAnchor.set(key, rIdx); // plain click moves the range anchor
+    }
+    if (sel.size === 0) this.selection.delete(key);
+    else this.selection.set(key, sel);
+    this.activeCardId = item.id;
+    this.activeSelKey = this.selection.has(key) ? key : null;
+    cx.notify();
+  }
+
+  /** Esc: drop every picked line of one card. Returns true if it had any. */
+  clearCardSelection(id) {
+    const prefix = id + "\u0000";
+    let had = false;
+    for (const key of Array.from(this.selection.keys())) {
+      if (key.startsWith(prefix)) {
+        this.selection.delete(key);
+        this.selAnchor.delete(key);
+        had = true;
+      }
+    }
+    if (this.activeSelKey !== null && this.activeSelKey.startsWith(prefix)) {
+      this.activeSelKey = null;
+      this.lineInput.set_value("");
+    }
+    return had;
+  }
+
+  /** The NEW-side line numbers of a key's selected rows, ascending; []
+   *  when nothing (valid) is selected. */
+  selLines(item, name) {
+    const file = this.diffFiles(item).find((f) => f.name === name);
+    const sel = this.selection.get(item.id + "\u0000" + name);
+    if (!file || !sel) return [];
+    const lines = [];
+    for (const i of sel) {
+      const r = file.rows[i];
+      if (r && r.line !== null) lines.push(r.line);
+    }
+    return lines.sort((a, b) => a - b);
+  }
+
+  /** Enter in the line-comment input (or its button): append the comment
+   *  to the card's list and clear that file's selection. */
+  addLineComment(cx) {
+    const key = this.activeSelKey;
+    if (key === null) return;
+    const text = this.lineInput.value().trim();
+    if (text === "") return;
+    const tab = key.indexOf("\u0000");
+    const id = key.slice(0, tab);
+    const item = this.items().find((i) => i.id === id);
+    if (!item) return;
+    const lines = this.selLines(item, key.slice(tab + 1));
+    if (lines.length === 0) return;
+    const list = this.comments.get(id) ?? [];
+    list.push({ file: key.slice(tab + 1), start: lines[0], end: lines[lines.length - 1], text });
+    this.comments.set(id, list);
+    this.selection.delete(key);
+    this.selAnchor.delete(key);
+    this.activeSelKey = null;
+    this.lineInput.set_value("");
+    cx.notify();
+  }
+
   /** One row of a file's AFTER-state diff, Zed-editor style. Fixed
    *  height — rows in scroll boxes must be sized explicitly or they
    *  collapse to nothing (the well() pattern). A row that inherited a
@@ -698,12 +860,20 @@ export default class Puli extends View {
     const isNote = row.t === "note";
     const hasMark = Array.isArray(row.removed) && row.removed.length > 0;
     const ghost = hasMark && this.hoveredMark === markId;
+    const selected = this.selection.get(item.id + "\u0000" + file.name)?.has(rIdx) === true;
+    // selection tint sits ON TOP of the add tint (accent over either)
+    let bg = isAdd ? mix(t.done, t.background, 0.16) : null;
+    if (selected) bg = mix(t.accent, bg ?? t.background, 0.2);
     const rows = [];
     // the row itself: [marker hit-area | text]; the marker (Zed-style
-    // gutter chip) sits at the START of the next surviving line
+    // gutter chip) sits at the START of the next surviving line. Rows
+    // with a new-side line number are clickable: pick lines to comment on.
     rows.push(
       h_flex().id("dl-" + markId).h(18).flex_none().items_stretch()
-        .when(isAdd, (e) => e.bg(mix(t.done, t.background, 0.16))) // tint
+        .when(bg !== null, (e) => e.bg(bg))
+        .when(row.line !== null, (e) => e.cursor_pointer()
+          .on_click((ev, cx) => this.rowClick(item, file, rIdx,
+            Boolean(ev && ev.modifiers && ev.modifiers.shift), cx)))
         .child(
           hasMark
             ? h_flex().id("mk-" + markId).w(9).h(18).flex_none().items_center()
@@ -773,6 +943,33 @@ export default class Puli extends View {
         .children(rows));
   }
 
+  /** Under a file's well, when that file has picked lines: the selection
+   *  summary ("main.py 14-17"), and — for the file lines were last
+   *  picked in — the comment input. Enter (or the button) appends the
+   *  comment to the card's list and clears the selection; Esc clears it. */
+  lineCommentBox(t, item, file, fIdx) {
+    const lines = this.selLines(item, file.name);
+    if (lines.length === 0) return null;
+    const start = lines[0];
+    const end = lines[lines.length - 1];
+    const id = item.id + "-" + fIdx;
+    const active = this.activeSelKey === item.id + "\u0000" + file.name;
+    return v_flex().id("lcbox-" + id).flex_none().pl(14).pt(2).gap(4)
+      .child(h_flex().id("lcsum-" + id).h(16).flex_none().items_center().gap(6)
+        .child(div().flex_none().font_family(mono()).text_size(10.5).text_color(t.accent)
+          .child(file.name + " " + (start === end ? String(start) : start + "-" + end)))
+        .child(div().flex_1())
+        .child(div().flex_none().text_size(10).text_color(t.dim)
+          .child(lines.length + (lines.length === 1 ? " line" : " lines") + " · Esc clears")))
+      .when(active, (e) => e.child(
+        h_flex().id("lcrow-" + id).flex_none().items_center().gap(8)
+          .child(div().id("lcin-" + id).flex_1().min_w(0).h(30).px(10).flex().items_center()
+            .rounded(8).border_1().border_color(t.accent).bg(t.background).cursor_text()
+            .child(Input.new(this.lineInput).h_full().text_size(12).text_color(t.foreground)))
+          .child(this.button("lcadd-" + id, "Comment", t.accent, t.accent_foreground, t.accent,
+            (_e, cx) => this.addLineComment(cx)))));
+  }
+
   /** One file row of the accordion: caret, mono filename, status hint,
    *  +/− counts. Click expands that file's diff right below it. */
   fileRow(t, item, file, idx, isOpen) {
@@ -802,8 +999,14 @@ export default class Puli extends View {
   /** The card's file accordion, straight from the frozen patch: a mini
    *  header (label + total +/−), one row per changed file, the expanded
    *  inline diff under any open row. No patch (old proposals, write
-   *  failures) → a "no patch captured" note instead. */
+   *  failures) → a "no patch captured" note instead. A push proposal
+   *  has no diff by design — just its push line. */
   filesSection(t, item) {
+    if (item.kind === "push") {
+      return v_flex().flex_none().pt(2)
+        .child(div().font_family(mono()).text_size(11).text_color(t.dim)
+          .child("push: " + String(item.branch ?? "") + " → " + (item.remote || "origin")));
+    }
     const files = this.diffFiles(item);
     if (files.length === 0) {
       return v_flex().flex_none().pt(2)
@@ -822,7 +1025,11 @@ export default class Puli extends View {
     shown.forEach((f, i) => {
       const isOpen = open.has(f.name);
       rows.push(this.fileRow(t, item, f, i, isOpen));
-      if (isOpen) rows.push(this.diffWell(t, item, f, i));
+      if (isOpen) {
+        rows.push(this.diffWell(t, item, f, i));
+        const box = this.lineCommentBox(t, item, f, i);
+        if (box) rows.push(box);
+      }
     });
     if (files.length > FILE_ROW_CAP) {
       rows.push(div().flex_none().px(6).text_size(10.5).text_color(t.muted)
@@ -862,10 +1069,19 @@ export default class Puli extends View {
         }
       })
       .on_key_down((e, cx) => {
-        if (e.key === "escape" && this.rejectingId !== null) {
+        if (e.key !== "escape") return;
+        let handled = false;
+        if (this.rejectingId !== null) {
           this.rejectingId = null;
           this.err = null;
           this.input.set_value("");
+          handled = true;
+        }
+        // the card lines were last picked on = the focused card
+        if (this.activeCardId !== null && this.clearCardSelection(this.activeCardId)) {
+          handled = true;
+        }
+        if (handled) {
           this.handle.focus();
           cx.stop_propagation();
           cx.notify();
@@ -937,11 +1153,11 @@ export default class Puli extends View {
       .children(wrap2(subject, this.subjectChars()).map((s, i) =>
         div().id("subj-" + id + "-" + i).text_size(13).font_semibold()
           .text_color(st ? t.dim : t.foreground).child(s === "" ? "\u00a0" : s)))
-      // the FULL commit message, always visible
+      // the FULL message, always visible (for a push: its push line)
       .child(this.well(t, "msg-" + id,
         String(item.message ?? "") === "" ? "(no message)" : String(item.message),
         st ? t.muted : t.foreground,
-        { label: "commit message", maxH: 320, chars: this.wellChars(), px: 0, pt: 0, bg: t.background }))
+        { label: item.kind === "push" ? "push" : "commit message", maxH: 320, chars: this.wellChars(), px: 0, pt: 0, bg: t.background }))
       // meta line: repo · branch · files · age
       .child(h_flex().id("meta-" + id).gap(8).items_center()
         .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.muted)
@@ -949,7 +1165,9 @@ export default class Puli extends View {
           .child(
             (baseName(item.repo) || String(item.repo ?? "")) +
             (String(item.branch ?? "") !== "" ? " · " + String(item.branch) : "") +
-            " · " + item.files.length + (item.files.length === 1 ? " file" : " files")))
+            (item.kind === "push"
+              ? " · push"
+              : " · " + item.files.length + (item.files.length === 1 ? " file" : " files"))))
         .child(div().flex_none().text_size(11).text_color(t.dim).child(age(item.createdAt))))
       // sent / answered states
       .when(st === "sent", (e) => e.child(h_flex().flex_none().items_center().gap(8)
@@ -979,6 +1197,22 @@ export default class Puli extends View {
       // the files accordion: every changed file, expandable to its inline
       // diff from the frozen patch (this replaces the old diffstat toggle)
       .child(this.filesSection(t, item))
+      // drafted line comments — sent with a Reject, × deletes one
+      .when((this.comments.get(id) ?? []).length > 0, (e) => {
+        const list = this.comments.get(id);
+        return e.child(v_flex().id("lclist-" + id).flex_none().pt(2).gap(1)
+          .child(div().flex_none().px(6).text_size(10.5).text_color(t.dim).child("line comments"))
+          .children(list.map((c, i) =>
+            h_flex().id("lcitem-" + id + "-" + i).flex_none().px(6).h(18).items_center().gap(6)
+              .child(div().flex_none().font_family(mono()).text_size(10.5).text_color(t.accent)
+                .child(c.file + ":" + (c.start === c.end ? String(c.start) : c.start + "-" + c.end)))
+              .child(div().flex_1().min_w(0).truncate().text_size(11)
+                .text_color(st ? t.muted : t.foreground).tooltip(c.text).child(c.text))
+              .child(div().id("lcdel-" + id + "-" + i).flex_none().w(14).h(18)
+                .flex().items_center().text_size(12).text_color(t.dim).cursor_pointer()
+                .hover((s) => s.text_color(t.blocked)).child("×")
+                .on_click((_e, cx) => { list.splice(i, 1); cx.notify(); })))))
+      })
       // per-card actions
       .child(h_flex().flex_none().items_center().gap(8)
         .child(this.button("approve-" + id, busy ? "…" : "Approve",

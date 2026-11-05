@@ -3,11 +3,12 @@
  *
  * Two jobs:
  *
- *  1. Commit gate. The agent never runs `git commit` / `git push`
- *     (denied in opencode.jsonc — see README). Instead it calls the
- *     `commit_request` tool:
- *       - the plugin stages/collects the proposed commit and parks it
- *         as ~/.local/state/puli/pending/<id>.json — a QUEUE: several
+ *  1. Commit + push gate. The agent never runs `git commit` /
+ *     `git push` (denied in opencode.jsonc — see README). Instead it
+ *     calls the `commit_request` / `push_request` tools:
+ *       - the plugin stages/collects the proposed commit (or computes
+ *         what a push would send) and parks it as
+ *         ~/.local/state/puli/pending/<id>.json — a QUEUE: several
  *         proposals (from different sessions) can wait at once
  *       - it opens the herdr app's Changes panel and sends a desktop
  *         notification (both best-effort)
@@ -16,10 +17,11 @@
  *         verdict.json — no ctx.permission, no ask (sessions driven
  *         by the weave adapter auto-approve those, so they prove
  *         nothing)
- *       - approved → the plugin runs `git commit` itself (plugin exec
- *         is not the agent's shell tool, so the deny rules don't apply
- *         — they gate the agent, not us); rejected → the comment text
- *         goes back to the agent as the tool result
+ *       - approved → the plugin runs `git commit` / `git push` itself
+ *         (plugin exec is not the agent's shell tool, so the deny
+ *         rules don't apply — they gate the agent, not us);
+ *         rejected → the comment text goes back to the agent as the
+ *         tool result
  *
  *  2. Serial tools. Thin proxies over serial-broker's unix socket
  *     ($XDG_RUNTIME_DIR/serial-broker.sock): list / read(since cursor) /
@@ -40,6 +42,7 @@ import {
   removeProposal,
   shortId,
   writeProposal,
+  type HistoryEntry,
   type Proposal,
   type Verdict,
 } from "./state.ts"
@@ -93,15 +96,128 @@ async function capturePatch(repo: string, id: string): Promise<string> {
 
 /** Run git in `cwd`, args as an array; throws with git's stderr in the message. */
 async function git(cwd: string, args: string[]): Promise<string> {
+  return gitRun(cwd, args).then((r) => r.stdout)
+}
+
+/** Like git(), but stdout+stderr combined — push writes its ref summary to stderr. */
+async function gitAll(cwd: string, args: string[]): Promise<string> {
+  return gitRun(cwd, args).then((r) => (r.stdout + r.stderr).trim())
+}
+
+async function gitRun(cwd: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
   try {
-    const { stdout } = await exec("git", ["-C", cwd, ...args], {
+    return await exec("git", ["-C", cwd, ...args], {
       maxBuffer: 16 * 1024 * 1024,
     })
-    return stdout
   } catch (err) {
     const e = err as { stderr?: string; message?: string }
     throw new Error(`git ${args.join(" ")} failed: ${(e.stderr ?? e.message ?? "").trim()}`)
   }
+}
+
+/**
+ * Poll the shared verdict slot until the answer for OUR id lands, the
+ * deadline passes, or the tool call is aborted. Only a verdict whose id
+ * matches is consumed (and cleared); anything else — another waiter's
+ * answer, a malformed id — is left in place and ignored.
+ */
+async function awaitVerdict(id: string, deadline: number, signal: AbortSignal): Promise<Verdict | null> {
+  for (;;) {
+    if (signal.aborted) return null
+    if (Date.now() > deadline) return null
+    await sleep(POLL_MS, signal)
+    if (signal.aborted) return null
+    const v = parseVerdict(await readVerdict())
+    if (v === null) continue // missing / malformed / half-formed: ignore
+    if (v.id !== id) continue // someone else's answer: not ours to take
+    await clearVerdict()
+    return v
+  }
+}
+
+/** Wording knobs that differ between the commit and push gates. */
+type GateNoun = {
+  /** "commit" | "push" — names the request in every not-approved text. */
+  noun: string
+  /** mid-sentence "nothing happened" phrase, e.g. "nothing was pushed". */
+  untouched: string
+  /** CLI review commands for the timeout guidance. */
+  reviewCmds: string
+}
+
+/**
+ * Settle every not-approved outcome (reject / abort / timeout) the same
+ * way for both gates: history line + tool result. The caller returns
+ * the result and removes the proposal from the queue.
+ */
+async function settleNotApproved(
+  pending: Proposal,
+  verdict: Verdict | null,
+  aborted: boolean,
+  timeoutMs: number,
+  gate: GateNoun,
+): Promise<{ content: string; metadata: Record<string, unknown> }> {
+  const subject = firstLine(pending.message)
+  const hist = (decision: HistoryEntry["decision"], detail?: string) =>
+    appendHistory({
+      id: pending.id,
+      subject,
+      repo: pending.repo,
+      branch: pending.branch,
+      decision,
+      detail,
+      at: new Date().toISOString(),
+    })
+
+  if (verdict?.decision === "reject") {
+    const note = verdict.message?.trim()
+    // Inline line comments picked on the review panel's diff
+    // (validated by parseVerdict; invalid items were skipped):
+    //   <file>:<start[-end]>: <text>
+    const comments = verdict.comments ?? []
+    const commentLines = comments.map((c) =>
+      `${c.file}:${c.start === c.end ? c.start : `${c.start}-${c.end}`}: ${c.text}`,
+    )
+    await hist("reject", note || undefined)
+    return {
+      content:
+        note || commentLines.length > 0
+          ? (note
+              ? `changes requested by user: ${note}`
+              : "changes requested by user (see line comments)") +
+            (commentLines.length > 0 ? "\n" + commentLines.join("\n") : "")
+          : `user rejected the ${gate.noun}`,
+      metadata: { id: pending.id, approved: false, comment: note ?? "", comments },
+    }
+  }
+  if (aborted) {
+    await hist("abort")
+    const untouched = gate.untouched.charAt(0).toUpperCase() + gate.untouched.slice(1)
+    return {
+      content:
+        `${gate.noun} request cancelled (the tool call was aborted). ${untouched}. ` +
+        `Ask the user how to proceed.`,
+      metadata: { id: pending.id, approved: false },
+    }
+  }
+  const waitDesc =
+    timeoutMs >= 60_000
+      ? `${Math.max(1, Math.round(timeoutMs / 60_000))} minutes`
+      : `${Math.round(timeoutMs / 1000)} seconds`
+  await hist("timeout")
+  return {
+    content:
+      `timed out after ${waitDesc} waiting for a decision — ${gate.untouched}. ` +
+      `Ask the user directly: they can review with ${gate.reviewCmds} in a terminal, ` +
+      `and you may propose again.`,
+    metadata: { id: pending.id, approved: false },
+  }
+}
+
+/** "behind\tahead" from `rev-list --left-right --count` → [behind, ahead]. */
+function parseLeftRight(out: string): [number, number] {
+  const [l = "0", r = "0"] = out.trim().split(/\s+/)
+  return [parseInt(l, 10) || 0, parseInt(r, 10) || 0]
 }
 
 export default Plugin.define({
@@ -255,23 +371,11 @@ export default Plugin.define({
           }
 
           // 6. Block for the human's decision (written by the puli CLI /
-          //    the panel). Consume ONLY a verdict whose id matches this
-          //    proposal; anything else (another waiter's verdict, a
-          //    malformed id) is left in place and ignored.
+          //    the panel). awaitVerdict consumes ONLY a verdict whose id
+          //    matches this proposal; anything else (another waiter's
+          //    verdict, a malformed id) is left in place and ignored.
           const timeoutMs = decisionTimeoutMs(input.timeoutMs)
-          const deadline = Date.now() + timeoutMs
-          let verdict: Verdict | null = null
-          while (verdict === null) {
-            if (context.signal.aborted) break
-            if (Date.now() > deadline) break
-            await sleep(POLL_MS, context.signal)
-            if (context.signal.aborted) break
-            const v = parseVerdict(await readVerdict())
-            if (v === null) continue // missing / malformed / half-formed: ignore
-            if (v.id !== pending.id) continue // someone else's answer: not ours to take
-            verdict = v
-            await clearVerdict()
-          }
+          const verdict = await awaitVerdict(pending.id, Date.now() + timeoutMs, context.signal)
 
           // 7. Settle. Whatever the outcome, this proposal leaves the queue.
           try {
@@ -318,40 +422,216 @@ export default Plugin.define({
             }
 
             // Rejected / timed out / cancelled.
-            if (verdict?.decision === "reject") {
-              const note = verdict.message?.trim()
-              await appendHistory({ id: pending.id, subject: firstLine(message), repo, branch,
-                decision: "reject", detail: note || undefined, at: new Date().toISOString() })
-              return {
-                content: note
-                  ? `changes requested by user: ${note}`
-                  : "user rejected the commit",
-                metadata: { id: pending.id, approved: false, comment: note ?? "" },
-              }
+            return await settleNotApproved(pending, verdict, context.signal.aborted, timeoutMs, {
+              noun: "commit",
+              untouched: "nothing was committed; the staged changes are untouched",
+              reviewCmds: "puli pending / puli show / puli diff",
+            })
+          } finally {
+            await removeProposal(pending.id)
+          }
+        },
+      })
+
+      editor.add({
+        name: "push_request",
+        description:
+          "Propose a git push for human review (git push is denied to you). " +
+          "Computes what WOULD be pushed (ahead/behind vs the branch's upstream, " +
+          "or a new remote branch — nothing is sent yet), records the proposal in the " +
+          "review queue (it may not be the only one waiting), then WAITS (up to 30 min) " +
+          "for the human to answer `puli approve` / `puli reject` in a terminal. " +
+          "Approved → the plugin pushes and returns the pushed refs; " +
+          "rejected → returns the human's comments.",
+        input: {
+          type: "object",
+          properties: {
+            repo: {
+              type: "string",
+              description:
+                "Directory to resolve the git repo from (defaults to this session's directory).",
+            },
+            remote: {
+              type: "string",
+              description: 'Remote to push to (default "origin").',
+            },
+            branch: {
+              type: "string",
+              description: "Branch to push (default: the current branch).",
+            },
+            timeoutMs: {
+              type: "number",
+              description:
+                "How long to wait for the human verdict, in milliseconds (default 30 min, min 10 s). " +
+                "Use a short value (e.g. 120000) for tests so the call cannot strand a session.",
+            },
+          },
+          additionalProperties: false,
+        },
+        options: { namespace: "puli", codemode: true },
+        execute: async (raw, context) => {
+          const input = raw as { repo?: string; remote?: string; branch?: string; timeoutMs?: number }
+
+          // 1. Resolve the repo root (git walks up from the directory itself).
+          const startDir = input.repo?.trim() || sessionDir
+          let repo: string
+          try {
+            repo = (await git(startDir, ["rev-parse", "--show-toplevel"])).trim()
+          } catch (err) {
+            throw new Error(`not a git repository (or no git): ${startDir} — ${(err as Error).message}`)
+          }
+
+          const remote = (input.remote ?? "").trim() || "origin"
+          try {
+            await git(repo, ["remote", "get-url", remote])
+          } catch {
+            throw new Error(`push_request: no remote '${remote}' in ${repo} — pass the right \`remote\`.`)
+          }
+
+          // 2. The branch to push (default: the current one). An unborn
+          //    HEAD has nothing to push — symbolic-ref's error says so.
+          const branch =
+            (input.branch ?? "").trim() ||
+            (await git(repo, ["symbolic-ref", "--short", "HEAD"])).trim()
+
+          // 3. What WOULD be pushed — computed only, nothing is sent.
+          //    Compare against the branch's upstream; without one, the
+          //    remote-tracking ref; without that, it's a new remote branch
+          //    (everything on the branch goes). Tracking refs are local
+          //    (no fetch): as stale as `git status` would report.
+          let base: string | null = null
+          try {
+            base = (await git(repo, [
+              "rev-parse",
+              "--abbrev-ref",
+              "--symbolic-full-name",
+              `${branch}@{u}`,
+            ])).trim()
+          } catch {
+            base = null // no upstream configured for this branch
+          }
+          let ahead = 0
+          let behind = 0
+          let note = "" // set when the upstream was not the comparison base
+          if (base !== null) {
+            ;[behind, ahead] = parseLeftRight(
+              await git(repo, ["rev-list", "--left-right", "--count", `${base}...${branch}`]),
+            )
+          } else {
+            const trackingRef = `refs/remotes/${remote}/${branch}`
+            const known = await git(repo, ["rev-parse", "--verify", "--quiet", trackingRef])
+              .then(() => true)
+              .catch(() => false)
+            if (known) {
+              ;[behind, ahead] = parseLeftRight(
+                await git(repo, ["rev-list", "--left-right", "--count", `${trackingRef}...${branch}`]),
+              )
+              note = `no upstream configured — comparing with ${remote}/${branch}`
+            } else {
+              ahead = parseInt((await git(repo, ["rev-list", "--count", branch])).trim(), 10) || 0
+              note = "new remote branch"
             }
-            if (context.signal.aborted) {
+          }
+          if (ahead <= 0) {
+            throw new Error(
+              `push_request: nothing to push — ${branch} is ahead of ` +
+                `${base ?? `${remote}/${branch}`} by 0 commits` +
+                (behind > 0 ? ` (and ${behind} behind)` : ""),
+            )
+          }
+          const message = `push ${branch} → ${remote} (${ahead} commit${ahead === 1 ? "" : "s"})`
+          const stat =
+            `ahead ${ahead}` + (behind > 0 ? `, behind ${behind}` : "") + (note !== "" ? ` (${note})` : "")
+
+          // 4. Park the proposal in the same queue (same contract as a
+          //    commit proposal; empty files/patch — the panel shows the
+          //    push line instead of a diff).
+          const id = newProposalId()
+          const pending: Proposal = {
+            id,
+            repo,
+            branch,
+            kind: "push",
+            remote,
+            message,
+            stat,
+            files: [],
+            patch: "",
+            createdAt: new Date().toISOString(),
+            expiresAt: new Date(Date.now() + decisionTimeoutMs(input.timeoutMs)).toISOString(),
+          }
+          await writeProposal(pending)
+
+          // 5. Best-effort attention getter — never fatal.
+          try {
+            await exec(
+              "notify-send",
+              [
+                "Puli: push proposed",
+                `${message} — review in the puli panel, then: puli pending | puli approve <id> | puli reject <id> -m 'comment'`,
+              ],
+              { timeout: 10_000 },
+            )
+          } catch {
+            /* notify-send missing or failed: skip silently */
+          }
+          try {
+            await context.progress({
+              status: `waiting for human review (${pending.id}) — puli approve | puli reject (push ${branch} → ${remote} in ${repo})`,
+            })
+          } catch {
+            /* progress is optional */
+          }
+
+          // 6. Block for the human's decision, then settle (same
+          //    contract as commit_request: only our id's verdict counts).
+          const timeoutMs = decisionTimeoutMs(input.timeoutMs)
+          const verdict = await awaitVerdict(pending.id, Date.now() + timeoutMs, context.signal)
+          try {
+            if (verdict?.decision === "approve") {
+              // execFile + args array, never a shell string.
+              let pushErr: string | null = null
+              let pushOut = ""
+              try {
+                pushOut = await gitAll(repo, ["push", remote, branch])
+              } catch (err) {
+                pushErr = (err as Error).message
+              }
+              if (pushErr !== null) {
+                await appendHistory({ id: pending.id, subject: firstLine(message), repo, branch,
+                  decision: "approve", detail: `push failed: ${pushErr}`, at: new Date().toISOString() })
+                return {
+                  content:
+                    `The user APPROVED the push, but git refused it — nothing was pushed.\n` +
+                    `${pushErr}\n` +
+                    `Fix the problem and call push_request again.`,
+                  metadata: { id: pending.id, approved: true, pushed: false },
+                }
+              }
+              const refs = pushOut
+                .split("\n")
+                .map((l) => l.trim())
+                .filter((l) => /\S+ -> \S+$/.test(l))
               await appendHistory({ id: pending.id, subject: firstLine(message), repo, branch,
-                decision: "abort", at: new Date().toISOString() })
+                decision: "approve", detail: `pushed ${branch} → ${remote}`, at: new Date().toISOString() })
               return {
                 content:
-                  "commit request cancelled (the tool call was aborted). Nothing was committed; " +
-                  "the staged changes are untouched. Ask the user how to proceed.",
-                metadata: { id: pending.id, approved: false },
+                  `pushed ${branch} → ${remote} (${ahead} commit${ahead === 1 ? "" : "s"}, approved by the user)\n\n` +
+                  (refs.length > 0 ? `refs:\n${refs.map((r) => `  ${r}`).join("\n")}\n\n` : "") +
+                  (behind > 0
+                    ? `note: the base ${base ?? `${remote}/${branch}`} is ${behind} commit${behind === 1 ? "" : "s"} behind\n`
+                    : "") +
+                  (note !== "" ? `${note}\n` : ""),
+                metadata: { id: pending.id, approved: true, pushed: true, remote, branch, refs, ahead, behind },
               }
             }
-            const waitDesc =
-              timeoutMs >= 60_000
-                ? `${Math.max(1, Math.round(timeoutMs / 60_000))} minutes`
-                : `${Math.round(timeoutMs / 1000)} seconds`
-            await appendHistory({ id: pending.id, subject: firstLine(message), repo, branch,
-              decision: "timeout", at: new Date().toISOString() })
-            return {
-              content:
-                `timed out after ${waitDesc} waiting for a decision — nothing was committed, ` +
-                `the staged changes are untouched. Ask the user directly: they can review with ` +
-                `puli pending / puli show / puli diff in a terminal, and you may propose again.`,
-              metadata: { id: pending.id, approved: false },
-            }
+
+            // Rejected / timed out / cancelled.
+            return await settleNotApproved(pending, verdict, context.signal.aborted, timeoutMs, {
+              noun: "push",
+              untouched: "nothing was pushed",
+              reviewCmds: "puli pending / puli show",
+            })
           } finally {
             await removeProposal(pending.id)
           }
@@ -365,8 +645,6 @@ export default Plugin.define({
       //     - serial_read({ port, since })
       //     - serial_write({ port, data })
       //     - serial_flash({ port, argv })
-      //
-      // [ ] push gate (after the commit gate proves itself)
     })
   },
 })
