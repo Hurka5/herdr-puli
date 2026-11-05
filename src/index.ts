@@ -65,6 +65,36 @@ function decisionTimeoutMs(inputMs?: number): number {
   return Number.isFinite(env) && env > 0 ? env : DECISION_TIMEOUT_MS
 }
 
+/**
+ * Desktop notification shown as coming from "herdr-puli" with the puli
+ * icon — gdbus is the only way to control the app name (notify-send
+ * hardcodes its own). Falls back to icon-less notify-send.
+ */
+async function desktopNotify(title: string, body: string): Promise<void> {
+  const icon = new URL("../puli.png", import.meta.url).pathname
+  try {
+    await exec(
+      "gdbus",
+      [
+        "call", "--session",
+        "--dest", "org.freedesktop.Notifications",
+        "--object-path", "/org/freedesktop/Notifications",
+        "--method", "org.freedesktop.Notifications.Notify",
+        "herdr-puli", "0", icon, title, body, "[]", "{}", "8000",
+      ],
+      { timeout: 10_000 },
+    )
+    return
+  } catch {
+    /* gdbus missing or the session bus refused: try the plain tool */
+  }
+  try {
+    await exec("notify-send", ["-i", icon, title, body], { timeout: 10_000 })
+  } catch {
+    /* no notifier at all: skip silently */
+  }
+}
+
 /** Sleep that wakes early when the tool call is aborted. */
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
@@ -351,16 +381,12 @@ export default Plugin.define({
           // (No view changes: the review panel in the herdr app lists proposals
           // on its own; jumping panels/spaces from here is forbidden by design.)
           try {
-            await exec(
-              "notify-send",
-              [
-                "Puli: commit proposed",
-                `${firstLine(message)} — review in the puli panel, then: puli pending | puli approve <id> | puli reject <id> -m 'comment'`,
-              ],
-              { timeout: 10_000 },
+            await desktopNotify(
+              "Puli: commit proposed",
+              `${firstLine(message)} — review in the Commits panel, then: puli pending | puli approve <id> | puli reject <id> -m 'comment'`,
             )
           } catch {
-            /* notify-send missing or failed: skip silently */
+            /* notification is best-effort */
           }
           try {
             await context.progress({
@@ -564,16 +590,12 @@ export default Plugin.define({
 
           // 5. Best-effort attention getter — never fatal.
           try {
-            await exec(
-              "notify-send",
-              [
-                "Puli: push proposed",
-                `${message} — review in the puli panel, then: puli pending | puli approve <id> | puli reject <id> -m 'comment'`,
-              ],
-              { timeout: 10_000 },
+            await desktopNotify(
+              "Puli: push proposed",
+              `${message} — review in the Commits panel, then: puli pending | puli approve <id> | puli reject <id> -m 'comment'`,
             )
           } catch {
-            /* notify-send missing or failed: skip silently */
+            /* notification is best-effort */
           }
           try {
             await context.progress({

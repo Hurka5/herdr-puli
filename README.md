@@ -1,62 +1,42 @@
-# herdr-puli
+<p align="center"><img src="puli.png" width="140" alt="puli"></p>
 
-![puli](puli.png)
+<h3 align="center">herdr-puli</h3>
 
-Commit gate for OpenCode agents, reviewed inside the Herdr app.
-Agents cannot commit or push on their own — they propose commits, and you
-approve, reject, or comment on them in the **Commits** panel.
+<p align="center">Commit gate for OpenCode agents, reviewed in the Herdr app.<br>Agents propose. You approve, reject, or comment. Nothing commits or pushes without you.</p>
 
-## What it does
-
-- `commit_request` tool for OpenCode agents: stages the files, snapshots
-  the diff, and waits for your verdict (default 30 min, then it gives up
-  and tells the agent).
-- `push_request` tool: the same gate for `git push` — shows what would be
-  pushed, pushes only after approval.
-- **Commits panel** in the Herdr app: a queue of proposals, each a card
-  with the full commit message and the changed files. Click a file to
-  expand its Zed-style diff (new code tinted, hover the red markers to
-  see what was removed). Click diff lines to comment on them — comments
-  go back to the agent as `file:line-range` references. Approve or
-  Reject directly on the card.
-- History of settled proposals: approved (with hash), rejected (with your
-  comment), timed out.
-- `puli` CLI with the same powers from any terminal:
-  `puli pending` · `puli show <id>` · `puli diff <id>` · `puli approve <id>` · `puli reject <id> -m "comment"`
-- The plugin — and only the plugin — runs `git commit`, after your approval.
+---
 
 ## How it works
 
-State lives in `~/.local/state/puli`:
+```
+agent ──▶ commit_request / push_request ──▶ Commits panel ──▶ approve / reject
+                                              │                    │
+                                     diff + message + files    comment on lines
+                                              │                    │
+                                              ▼                    ▼
+                                        nothing moves        agent gets
+                                        until you click      file:line notes
+```
 
-| file | what |
-|---|---|
-| `pending/<id>.json` | one file per proposed commit: message, files, diff snapshot |
-| `verdict.json` | your answer (approve/reject + comment), consumed by the waiting plugin |
-| `history.jsonl` | every settled proposal, one JSON line each |
-
-The fence matters as much as the gate: without deny rules, agents can just
-run `git commit` themselves. Both are part of this setup.
+- **The gate**: `git commit` and `git push` are denied to agents. The puli plugin is the only thing that runs them — after your approval.
+- **The panel**: a Commits tab in the Herdr app. Full commit message, Zed-style inline diff (hover the red markers to see removed lines), approve / reject on the card.
+- **Line comments**: click diff lines, write why they're wrong. Reject sends them to the agent as `file:line-range` references — no hand-typed line numbers.
+- **CLI**: `puli pending · show · diff · approve · reject` from any terminal.
 
 ## Install
 
-Needs: OpenCode v2, Bun, the Herdr app (for the panel).
+Requires [OpenCode](https://opencode.ai) v2, [Bun](https://bun.sh), and the [Herdr app](https://herdr.dev) for the panel.
 
 ```sh
-git clone git@github.com:Hurka5/herdr-puli.git
+git clone https://github.com/Hurka5/herdr-puli.git
 cd herdr-puli
 bun install
 ./install.sh
 ```
 
-`install.sh` is idempotent. It symlinks the plugin, the panel mod, the
-commit-gate skill, and the `puli` CLI, tries to register the plugin in
-`~/.config/opencode/opencode.jsonc`, and adds the Commits button to the
-Herdr tab bar if your tab-bar mod supports it. Anything it cannot do
-safely itself, it prints exactly what to paste.
+Then paste the deny rules into `~/.config/opencode/opencode.jsonc` — the installer prints them, or take them from [README-fence](#the-fence) below. Without them agents can commit around the gate.
 
-Then put the deny rules into `~/.config/opencode/opencode.jsonc` (the
-installer prints this block too):
+## The fence
 
 ```jsonc
 "permissions": [
@@ -74,35 +54,20 @@ installer prints this block too):
 ]
 ```
 
-## Agent usage
-
-Agents never run `git commit` or `git push` (denied). They stage, write
-the message, and call:
-
-```
-commit_request({ message, files?, repo?, timeoutMs? })   # commit
-push_request({ repo?, remote?, branch?, timeoutMs? })    # push
-```
-
-The installed commit-gate skill teaches every OpenCode session this flow.
-On reject, the tool returns your comment; the agent fixes and re-proposes.
-
-## Repo layout
+## Layout
 
 | path | what |
 |---|---|
-| `src/` | OpenCode plugin (server part) |
+| `src/` | OpenCode plugin — `commit_request`, `push_request`, history |
+| `herdr-app/mods/puli/` | the Commits panel |
 | `bin/puli` | CLI |
-| `herdr-app/mods/puli/` | the Commits panel mod |
-| `skills/commit-gate/` | global OpenCode skill |
-| `install.sh` | machine setup |
+| `skills/commit-gate/` | teaches every agent session the flow |
+| `install.sh` | machine setup, idempotent |
+
+State lives in `~/.local/state/puli` (`pending/`, `verdict.json`, `history.jsonl`). Proposals expire on their own; dead cards never stick.
 
 ## Notes
 
-- The answer file is `verdict.json`. On some machines a file named
-  `decision.json` gets deleted by an external watcher within moments —
-  do not rename it.
-- Panel edits hot-reload. Under heavy load the Herdr app's watcher can
-  lag for a minute; saving any mod file snaps it current.
-- Serial-port tooling (`serial_*` tools) comes from the separate
-  serial-broker project.
+- The answer file is `verdict.json` — never rename it to `decision.json` (some setups reap that name).
+- Panel edits hot-reload; under heavy load the Herdr watcher can lag a minute. Restarting the app window always applies instantly.
+- Serial-port tooling lives in the separate [serial-broker](https://github.com/Hurka5/serial-broker) project.
