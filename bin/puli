@@ -1,0 +1,307 @@
+#!/usr/bin/env bun
+/**
+ * puli — the human side of the commit gate.
+ *
+ * The opencode-puli plugin's `commit_request` tool parks proposed
+ * commits in ~/.local/state/puli/pending/<id>.json — a QUEUE, one file
+ * per proposal (several sessions may wait at once) — and waits for a
+ * verdict. You review (herdr app Changes panel, or `puli diff`) and
+ * answer here:
+ *
+ *   puli pending                  list every proposal (short id, subject, repo, age)
+ *   puli show [id]                full detail (id optional when exactly one waits)
+ *   puli diff [id]                that proposal's staged diff, in $PAGER or stdout
+ *   puli approve [id]             let the plugin commit it
+ *   puli reject [id] -m "cmt"     send it back with change requests
+ *                                 (also: --message, or a positional message)
+ *
+ * <id> may be a prefix (unambiguous); `puli pending` shows the short
+ * form (the random6 tail of the full id).
+ *
+ * The answer is written to verdict.json (NOT decision.json — on this
+ * machine an external watcher deletes files named decision.json in
+ * this directory). The waiting plugin instance whose proposal id
+ * matches consumes it; verdicts for other/unknown ids are left alone.
+ */
+import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises"
+import { homedir } from "node:os"
+import path from "node:path"
+
+type Proposal = {
+  id: string
+  repo: string
+  branch: string
+  message: string
+  stat: string
+  files: string[]
+  /** Staged diff frozen at proposal time; missing on old proposals. */
+  patch?: string
+  createdAt: string
+}
+type Verdict = { id: string; decision: "approve" | "reject"; message?: string; at?: string }
+
+const stateDir = path.join(homedir(), ".local", "state", "puli")
+const pendingDir = path.join(stateDir, "pending")
+const verdictPath = path.join(stateDir, "verdict.json")
+
+async function writeAtomic(file: string, text: string): Promise<void> {
+  await mkdir(path.dirname(file), { recursive: true })
+  const tmp = `${file}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
+  await writeFile(tmp, text, "utf8")
+  await rename(tmp, file)
+}
+
+async function readJson<T>(file: string): Promise<T | null> {
+  try {
+    return JSON.parse(await readFile(file, "utf8")) as T
+  } catch {
+    return null
+  }
+}
+
+function firstLine(s: string): string {
+  return (s.split("\n", 1)[0] ?? "").trim()
+}
+
+function shortId(id: string): string {
+  const tail = id.split("-").pop() ?? id
+  return tail.length >= 6 ? tail : id.slice(-6)
+}
+
+function basename(p: string): string {
+  return p.split("/").filter(Boolean).pop() ?? p
+}
+
+function ageOf(iso: string): string {
+  const ms = Date.now() - Date.parse(iso)
+  if (!Number.isFinite(ms) || ms < 0) return "?"
+  const s = Math.floor(ms / 1000)
+  if (s < 60) return `${s}s`
+  if (s < 3600) return `${Math.floor(s / 60)}m`
+  if (s < 86400) return `${Math.floor(s / 3600)}h`
+  return `${Math.floor(s / 86400)}d`
+}
+
+function fail(msg: string): never {
+  console.error(`puli: ${msg}`)
+  process.exit(1)
+}
+
+/** Every valid proposal in the queue, oldest first. */
+async function listProposals(): Promise<Proposal[]> {
+  let entries: string[]
+  try {
+    entries = await readdir(pendingDir)
+  } catch {
+    return []
+  }
+  const proposals: Proposal[] = []
+  for (const entry of entries.sort()) {
+    if (!entry.endsWith(".json")) continue // skips *.tmp-* in-flight writes
+    const p = await readJson<Proposal>(path.join(pendingDir, entry))
+    if (p && typeof p.id === "string" && p.id !== "") proposals.push(p)
+  }
+  proposals.sort((a, b) => (a.createdAt ?? "").localeCompare(b.createdAt ?? "") || a.id.localeCompare(b.id))
+  return proposals
+}
+
+const NO_PENDING =
+  "no pending commit proposals. (Agents propose commits with the commit_request tool; nothing is waiting for review.)"
+
+function idLine(p: Proposal): string {
+  return `  ${shortId(p.id)}  ${firstLine(p.message)}`
+}
+
+/**
+ * Pick the proposal the user means: exact id, unambiguous prefix of the
+ * full id, or prefix of the short id. No id → fine when exactly one
+ * proposal waits.
+ */
+async function resolveProposal(arg?: string): Promise<Proposal> {
+  const all = await listProposals()
+  if (all.length === 0) fail(NO_PENDING)
+  if (!arg) {
+    if (all.length === 1) return all[0]!
+    fail(
+      `${all.length} proposals pending — give an id (prefix ok):\n${all.map(idLine).join("\n")}`,
+    )
+  }
+  const matches = all.filter(
+    (p) => p.id === arg || p.id.startsWith(arg) || shortId(p.id).startsWith(arg),
+  )
+  if (matches.length === 0) {
+    fail(`no pending proposal matches id '${arg}' — pending: ${all.map((p) => shortId(p.id)).join(", ")}`)
+  }
+  if (matches.length > 1) {
+    fail(
+      `ambiguous id '${arg}' — matches:\n${matches.map(idLine).join("\n")}`,
+    )
+  }
+  return matches[0]!
+}
+
+async function cmdPending(): Promise<void> {
+  const all = await listProposals()
+  if (all.length === 0) {
+    console.log(`puli: ${NO_PENDING}`)
+    return
+  }
+  console.log(`puli: ${all.length} pending commit proposal${all.length > 1 ? "s" : ""}`)
+  for (const p of all) {
+    const age = p.createdAt ? ` ${ageOf(p.createdAt)} ago` : ""
+    console.log(
+      `${shortId(p.id)}  ${firstLine(p.message)}  [${basename(p.repo)}${p.branch ? " " + p.branch : ""}]${age}`,
+    )
+  }
+  console.log(`answer:   puli show <id> | puli approve <id> | puli reject <id> -m 'comment'`)
+}
+
+async function cmdShow(arg?: string): Promise<void> {
+  const p = await resolveProposal(arg)
+  const short = shortId(p.id)
+  console.log(`puli proposal ${p.id}`)
+  console.log(`repo:     ${p.repo} (${p.branch ?? "?"})`)
+  console.log(`created:  ${p.createdAt ?? "?"}${p.createdAt ? ` (${ageOf(p.createdAt)} ago)` : ""}`)
+  console.log(`message:`)
+  for (const line of p.message.split("\n")) console.log(`  ${line}`)
+  console.log(`staged:`)
+  for (const line of (p.stat ?? "").split("\n")) console.log(`  ${line}`)
+  // The frozen patch (what approval will commit), first 200 lines.
+  const patchLines = typeof p.patch === "string" ? p.patch.replace(/\n$/, "").split("\n") : []
+  if (patchLines.length > 0 && p.patch!.trim() !== "") {
+    console.log(`patch:`)
+    for (const line of patchLines.slice(0, 200)) console.log(`  ${line}`)
+    if (patchLines.length > 200) {
+      console.log(`  … ${patchLines.length - 200} more lines — puli diff ${short}`)
+    }
+  } else {
+    console.log(`patch:    (none captured — puli diff ${short} shows the live staged diff)`)
+  }
+  if (Array.isArray(p.files) && p.files.length > 0) {
+    console.log(`files:`)
+    for (const f of p.files) console.log(`  ${f}`)
+  }
+  console.log(`diff:     puli diff ${short}`)
+  console.log(`answer:   puli approve ${short} | puli reject ${short} -m 'comment'`)
+}
+
+async function cmdDiff(arg?: string): Promise<void> {
+  const p = await resolveProposal(arg)
+  const git = Bun.spawnSync(["git", "-C", p.repo, "--no-pager", "diff", "--cached"], {
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  if (git.exitCode !== 0) {
+    fail(`git diff failed in ${p.repo}: ${new TextDecoder().decode(git.stderr).trim()}`)
+  }
+  const diff = new TextDecoder().decode(git.stdout)
+  if (diff.trim() === "") {
+    console.log("puli: nothing staged (the staged diff is empty)")
+    return
+  }
+  const pager = process.env.PAGER
+  if (pager && process.stdout.isTTY) {
+    const proc = Bun.spawn(["sh", "-c", pager], { stdin: "pipe", stdout: "inherit", stderr: "inherit" })
+    proc.stdin.write(diff)
+    await proc.stdin.end()
+    await proc.exited
+  } else {
+    process.stdout.write(diff)
+  }
+}
+
+async function cmdApprove(arg?: string): Promise<void> {
+  const p = await resolveProposal(arg)
+  await writeAtomic(
+    verdictPath,
+    JSON.stringify({ id: p.id, decision: "approve", at: new Date().toISOString() }, null, 2) + "\n",
+  )
+  console.log(`approved ${shortId(p.id)}: ${firstLine(p.message)} — committing…`)
+}
+
+async function cmdReject(argv: string[]): Promise<void> {
+  let flagMessage = ""
+  const positionals: string[] = []
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]!
+    if (a === "-m" || a === "--message") {
+      flagMessage = argv[i + 1] ?? fail(`${a} needs a value: puli reject -m "your comment"`)
+      i++
+    } else if (a.startsWith("--message=")) {
+      flagMessage = a.slice("--message=".length)
+    } else if (!a.startsWith("-")) {
+      positionals.push(a)
+    }
+  }
+  // First positional is an id (or id prefix) when it matches a pending
+  // proposal; otherwise positionals are the comment (old-style usage).
+  let idArg: string | undefined
+  let commentArg = ""
+  if (positionals.length > 0) {
+    const all = await listProposals()
+    const first = positionals[0]!
+    const matches = all.filter(
+      (p) => p.id === first || p.id.startsWith(first) || shortId(p.id).startsWith(first),
+    )
+    if (matches.length === 1) {
+      idArg = first
+      commentArg = positionals.slice(1).join(" ")
+    } else if (matches.length > 1) {
+      fail(`ambiguous id '${first}' — matches:\n${matches.map(idLine).join("\n")}`)
+    } else {
+      commentArg = positionals.join(" ")
+    }
+  }
+  const p = await resolveProposal(idArg)
+  const message = (flagMessage || commentArg).trim()
+  const verdict: Verdict = message
+    ? { id: p.id, decision: "reject", message, at: new Date().toISOString() }
+    : { id: p.id, decision: "reject", at: new Date().toISOString() }
+  await writeAtomic(verdictPath, JSON.stringify(verdict, null, 2) + "\n")
+  console.log(
+    `rejected ${shortId(p.id)}: ${firstLine(p.message)} — asking for changes${message ? `: ${message}` : ""}`,
+  )
+}
+
+function usage(): void {
+  console.log(`usage: puli <command>
+
+  pending                 list pending proposals (short id, subject, repo, age)
+  show [id]               full detail of one proposal (id optional when exactly one)
+  diff [id]               staged diff of that proposal's repo ($PAGER or stdout)
+  approve [id]            approve it — the plugin commits
+  reject [id] [-m <msg>]  reject it; -m/--message or a positional = your comment
+
+<id> accepts unambiguous prefixes; puli pending prints the short form.`)
+}
+
+const [cmd, ...rest] = process.argv.slice(2)
+switch (cmd) {
+  case "pending":
+    await cmdPending()
+    break
+  case "show":
+    await cmdShow(rest[0])
+    break
+  case "diff":
+    await cmdDiff(rest[0])
+    break
+  case "approve":
+    await cmdApprove(rest[0])
+    break
+  case "reject":
+    await cmdReject(rest)
+    break
+  case "help":
+  case "--help":
+  case "-h":
+    usage()
+    break
+  case undefined:
+    usage()
+    process.exit(1)
+  default:
+    console.error(`puli: unknown command: ${cmd}`)
+    usage()
+    process.exit(1)
+}

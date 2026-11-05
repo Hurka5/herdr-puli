@@ -1,0 +1,3 @@
+node_modules/
+*.error
+.DS_Store
