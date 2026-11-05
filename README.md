@@ -70,4 +70,3 @@ State lives in `~/.local/state/puli` (`pending/`, `verdict.json`, `history.jsonl
 
 - The answer file is `verdict.json` — never rename it to `decision.json` (some setups reap that name).
 - Panel edits hot-reload; under heavy load the Herdr watcher can lag a minute. Restarting the app window always applies instantly.
-- Serial-port tooling lives in the separate [serial-broker](https://github.com/Hurka5/serial-broker) project.

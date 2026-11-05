@@ -1,7 +1,7 @@
 {
   "name": "opencode-puli",
   "version": "0.0.1",
-  "description": "OpenCode plugin: commit gate (herdr app review flow) + serial monitor tools backed by serial-broker",
+  "description": "Commit and push gate for OpenCode agents, reviewed in the Herdr app",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
