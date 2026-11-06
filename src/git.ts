@@ -6,19 +6,24 @@ import { shortId } from "./state.ts"
 const exec = promisify(execFile)
 
 /** Run git in `cwd`, args as an array; throws with git's stderr in the message. */
-export async function git(cwd: string, args: string[]): Promise<string> {
-  return gitRun(cwd, args).then((r) => r.stdout)
+export async function git(cwd: string, args: string[], opts?: { timeout?: number }): Promise<string> {
+  return gitRun(cwd, args, opts).then((r) => r.stdout)
 }
 
 /** Like git(), but stdout+stderr combined — push writes its ref summary to stderr. */
-export async function gitAll(cwd: string, args: string[]): Promise<string> {
-  return gitRun(cwd, args).then((r) => (r.stdout + r.stderr).trim())
+export async function gitAll(cwd: string, args: string[], opts?: { timeout?: number }): Promise<string> {
+  return gitRun(cwd, args, opts).then((r) => (r.stdout + r.stderr).trim())
 }
 
-export async function gitRun(cwd: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
+export async function gitRun(
+  cwd: string,
+  args: string[],
+  opts?: { timeout?: number },
+): Promise<{ stdout: string; stderr: string }> {
   try {
     return await exec("git", ["-C", cwd, ...args], {
       maxBuffer: 16 * 1024 * 1024,
+      ...(opts?.timeout !== undefined ? { timeout: opts.timeout } : {}),
     })
   } catch (err) {
     const e = err as { stderr?: string; message?: string }

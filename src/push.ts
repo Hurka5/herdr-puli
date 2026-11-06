@@ -75,10 +75,19 @@ export function pushRequestTool(sessionDir: string): Info {
         (await git(repo, ["symbolic-ref", "--short", "HEAD"])).trim()
 
       // 3. What WOULD be pushed — computed only, nothing is sent.
+      //    A quiet fetch of the remote first refreshes the tracking
+      //    refs so the counts below are the real ones. Offline / bad
+      //    remote → fall back to the local tracking refs (as stale as
+      //    `git status` would report) and say so in the stat.
+      let stale = false
+      try {
+        await git(repo, ["fetch", "--quiet", remote], { timeout: 15_000 })
+      } catch {
+        stale = true
+      }
       //    Compare against the branch's upstream; without one, the
       //    remote-tracking ref; without that, it's a new remote branch
-      //    (everything on the branch goes). Tracking refs are local
-      //    (no fetch): as stale as `git status` would report.
+      //    (everything on the branch goes).
       let base: string | null = null
       try {
         base = (await git(repo, [
@@ -121,7 +130,8 @@ export function pushRequestTool(sessionDir: string): Info {
       }
       const message = `push ${branch} → ${remote} (${ahead} commit${ahead === 1 ? "" : "s"})`
       const stat =
-        `ahead ${ahead}` + (behind > 0 ? `, behind ${behind}` : "") + (note !== "" ? ` (${note})` : "")
+        `ahead ${ahead}` + (behind > 0 ? `, behind ${behind}` : "") + (note !== "" ? ` (${note})` : "") +
+        (stale ? " (stale — offline)" : "")
 
       // 4. Park the proposal in the same queue (same contract as a
       //    commit proposal; empty files/patch — the panel shows the

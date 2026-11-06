@@ -163,7 +163,7 @@ function shortId(id) {
 // PATCH_LINE_CAP chars, a file renders at most DIFF_ROW_CAP rows (with
 // a "use puli diff" note), a card lists at most FILE_ROW_CAP file rows.
 
-const PATCH_LINE_CAP = 200; // chars kept per diff line (long lines: keep the tail)
+const PATCH_LINE_CAP = 400; // chars kept per diff line (long lines: keep the tail)
 const DIFF_ROW_CAP = 800;   // rendered rows per expanded file
 const FILE_ROW_CAP = 200;   // file rows per card
 
@@ -865,15 +865,21 @@ export default class Puli extends View {
     let bg = isAdd ? mix(t.done, t.background, 0.16) : null;
     if (selected) bg = mix(t.accent, bg ?? t.background, 0.2);
     const rows = [];
-    // the row itself: [marker hit-area | text]; the marker (Zed-style
-    // gutter chip) sits at the START of the next surviving line. Rows
-    // with a new-side line number are clickable: pick lines to comment on.
+    // the row itself: [line gutter | marker hit-area | text]; the gutter
+    // shows the NEW-side line number (blank on hunk/note/tail rows),
+    // always dim; the marker (Zed-style gutter chip) sits at the START
+    // of the next surviving line. Rows with a new-side line number are
+    // clickable: pick lines to comment on.
     rows.push(
       h_flex().id("dl-" + markId).h(18).flex_none().items_stretch()
         .when(bg !== null, (e) => e.bg(bg))
         .when(row.line !== null, (e) => e.cursor_pointer()
           .on_click((ev, cx) => this.rowClick(item, file, rIdx,
             Boolean(ev && ev.modifiers && ev.modifiers.shift), cx)))
+        .child(
+          div().w(30).flex_none().pr(3).text_right()
+            .font_family(mono()).text_size(10).text_color(t.dim)
+            .child(row.line === null ? "" : String(row.line)))
         .child(
           hasMark
             ? h_flex().id("mk-" + markId).w(9).h(18).flex_none().items_center()
@@ -886,7 +892,7 @@ export default class Puli extends View {
                 .child(div().w(3).h(12).flex_none().rounded(1).bg(t.blocked))
             : div().w(9).h(18).flex_none())
         .child(div().flex_1().min_w(0).pl(3).font_family(mono()).text_size(11)
-          .truncate()
+          .whitespace_nowrap()
           .when(isHunk || isNote, (e) => e.font_semibold())
           .text_color(
             isNote || isHunk ? t.muted :
@@ -899,8 +905,9 @@ export default class Puli extends View {
         const gl = row.removed[g];
         rows.push(
           div().id("gh-" + markId + "-" + g).h(18).flex_none().font_family(mono())
-            .text_size(11).bg(mix(t.blocked, t.background, 0.13))
-            .pl(24).truncate().text_color(t.blocked)
+            .text_size(11).whitespace_nowrap()
+            .bg(mix(t.blocked, t.background, 0.13))
+            .pl(24).text_color(t.blocked)
             .child(gl === "" ? "\u00a0" : gl));
       }
     }
@@ -912,35 +919,55 @@ export default class Puli extends View {
    *  headers as dim separators; removals as red gutter markers with
    *  hover-reveal). Nothing here runs anything — the patch is already
    *  on disk in pending/<id>.json. DIFF_ROW_CAP rows max (then a
-   *  "+N more lines" note). */
+   *  "+N more lines" note). The well scrolls sideways too: the rows
+   *  wrapper is min-width-sized to the longest rendered line (the
+   *  Changes mod's overflow_x pattern), so rows render at full length
+   *  instead of truncating at the panel width. */
   diffWell(t, item, file, idx) {
     const id = item.id + "-" + idx;
     const rows = [];
+    const texts = []; // every rendered line string, for the min width
+    const addText = (s) => texts.push(s);
     if (file.status === "binary") {
+      const s = "binary file — no text diff";
+      addText(s);
       rows.push(div().id("dl-" + id + "-bin").h(18).flex_none().font_family(mono())
-        .text_size(11).text_color(t.muted).child("binary file — no text diff"));
+        .text_size(11).text_color(t.muted).child(s));
     } else if (file.status === "meta") {
+      const s = "no text changes (rename / mode change only)";
+      addText(s);
       rows.push(div().id("dl-" + id + "-meta").h(18).flex_none().font_family(mono())
-        .text_size(11).text_color(t.muted)
-        .child("no text changes (rename / mode change only)"));
+        .text_size(11).text_color(t.muted).child(s));
     } else if (file.rows.length === 0) {
+      const s = "(empty diff)";
+      addText(s);
       rows.push(div().id("dl-" + id + "-empty").h(18).flex_none().font_family(mono())
-        .text_size(11).text_color(t.muted).child("(empty diff)"));
+        .text_size(11).text_color(t.muted).child(s));
     } else {
       const shown = file.rows.slice(0, DIFF_ROW_CAP);
-      shown.forEach((row, i) => rows.push(...this.diffRow(t, item, file, idx, row, i)));
+      shown.forEach((row, i) => {
+        addText(row.s);
+        if (Array.isArray(row.removed)) for (const gl of row.removed) addText(gl);
+        rows.push(...this.diffRow(t, item, file, idx, row, i));
+      });
       if (file.rows.length > DIFF_ROW_CAP) {
+        const s = "+" + (file.rows.length - DIFF_ROW_CAP) + " more lines — use puli diff " + shortId(item.id);
+        addText(s);
         rows.push(div().id("dl-" + id + "-more").h(18).flex_none().font_family(mono())
-          .text_size(11).font_semibold().text_color(t.muted)
-          .child("+" + (file.rows.length - DIFF_ROW_CAP) + " more lines — use puli diff " + shortId(item.id)));
+          .text_size(11).font_semibold().text_color(t.muted).child(s));
       }
     }
     // ghost rows only exist while hovered; size the well from the base rows
     const boxH = Math.min(300, Math.max(14 + 18, rows.length * 18 + 18));
+    // longest line at the mono advance (11px ≈ 6.5px/char, 7 leaves
+    // margin) + gutter + marker + text padding + a little right room
+    let maxChars = 0;
+    for (const s of texts) if (s.length > maxChars) maxChars = s.length;
+    const minW = 30 + 9 + 3 + Math.ceil(maxChars * 7) + 8;
     return v_flex().id("dw-" + id).flex_none().pl(14).pt(1)
-      .child(div().id("dwb-" + id).h(boxH).overflow_y_scrollbar()
+      .child(div().id("dwb-" + id).h(boxH).overflow_scrollbar()
         .py(8).rounded(6).bg(t.background).border_1().border_color(t.border)
-        .children(rows));
+        .child(div().id("dwr-" + id).w_full().min_w(minW).children(rows)));
   }
 
   /** Under a file's well, when that file has picked lines: the selection
