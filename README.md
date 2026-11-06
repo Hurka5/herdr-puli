@@ -8,14 +8,7 @@
 
 ## How it works
 
-```mermaid
-flowchart LR
-    A[agent] -->|commit_request<br/>push_request<br/>git_request| Q[review queue]
-    Q --> P[Commits panel<br/>diff · message · line comments]
-    P -->|approve| G[puli runs git<br/>commit / push / merge …]
-    P -->|reject + comments| A
-    G --> H[(history)]
-```
+<p align="center"><img src="docs/flow.svg" alt="agent proposes to the review queue; the Commits panel shows the diff; approve → puli runs git and records history; reject → line comments go back to the agent"></p>
 
 - **The gate**: `git commit` and `git push` are denied to agents. The puli plugin is the only thing that runs them — after your approval.
 - **Full fence coverage**: every fenced git command has a gated path — `commit_request` / `push_request` for commits and pushes (with diff preview), the generic `git_request` for merge / rebase / cherry-pick / revert / plumbing.
