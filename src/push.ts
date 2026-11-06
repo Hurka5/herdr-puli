@@ -18,6 +18,21 @@ function parseLeftRight(out: string): [number, number] {
   return [parseInt(l, 10) || 0, parseInt(r, 10) || 0]
 }
 
+/**
+ * The remote's default branch (what its HEAD points at), or null when
+ * that can't be answered (offline, or a remote with a detached HEAD).
+ * gitAll because the `ref:` symref line rides stderr on old gits.
+ */
+async function remoteDefaultBranch(repo: string, remote: string): Promise<string | null> {
+  let out: string
+  try {
+    out = await gitAll(repo, ["ls-remote", "--symref", remote, "HEAD"], { timeout: 10_000 })
+  } catch {
+    return null
+  }
+  return out.match(/^ref:\s+refs\/heads\/(\S+)/m)?.[1] ?? null
+}
+
 export function pushRequestTool(sessionDir: string): Info {
   return {
     name: "push_request",
@@ -86,8 +101,8 @@ export function pushRequestTool(sessionDir: string): Info {
         stale = true
       }
       //    Compare against the branch's upstream; without one, the
-      //    remote-tracking ref; without that, it's a new remote branch
-      //    (everything on the branch goes).
+      //    remote-tracking ref; without that, it's a new remote branch,
+      //    counted against the remote's default branch.
       let base: string | null = null
       try {
         base = (await git(repo, [
@@ -117,8 +132,44 @@ export function pushRequestTool(sessionDir: string): Info {
           )
           note = `no upstream configured — comparing with ${remote}/${branch}`
         } else {
-          ahead = parseInt((await git(repo, ["rev-list", "--count", branch])).trim(), 10) || 0
-          note = "new remote branch"
+          // New remote branch. The whole-history count overstates the
+          // push when most of the branch already lives on the remote
+          // under another name (e.g. a topic branch off main): the push
+          // uploads — and an MR would show — only the delta vs the
+          // remote's default branch.
+          const remoteDefault = await remoteDefaultBranch(repo, remote)
+          let baseRef: string | null = null
+          let baseName = ""
+          for (const name of [remoteDefault, "main", "master", "develop"]) {
+            if (name === null) continue
+            const ref = `refs/remotes/${remote}/${name}`
+            const known = await git(repo, ["rev-parse", "--verify", "--quiet", ref])
+              .then(() => true)
+              .catch(() => false)
+            if (known) {
+              baseRef = ref
+              baseName = name
+              break
+            }
+          }
+          if (baseRef === null) {
+            ahead = parseInt((await git(repo, ["rev-list", "--count", branch])).trim(), 10) || 0
+            note = "new remote branch"
+          } else {
+            const sharedAncestor = await git(repo, ["merge-base", baseRef, branch])
+              .then((out) => out.trim() !== "")
+              .catch(() => false)
+            if (sharedAncestor) {
+              ahead = parseInt(
+                (await git(repo, ["rev-list", "--count", `${baseRef}..${branch}`])).trim(),
+                10,
+              ) || 0
+              note = `new branch · vs ${remote}/${baseName}`
+            } else {
+              ahead = parseInt((await git(repo, ["rev-list", "--count", branch])).trim(), 10) || 0
+              note = "new orphan branch · full history"
+            }
+          }
         }
       }
       if (ahead <= 0) {
