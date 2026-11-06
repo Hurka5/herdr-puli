@@ -1,3 +1,6 @@
 node_modules/
 *.error
 .DS_Store
+# app-written, regenerated on every start
+herdr-app/mods/puli/gpui-kit.d.ts
+herdr-app/mods/puli/jsconfig.json

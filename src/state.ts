@@ -151,10 +151,6 @@ export async function listProposals(): Promise<Proposal[]> {
   return proposals
 }
 
-export function writeVerdict(v: Verdict): Promise<void> {
-  return writeAtomic(verdictPath, JSON.stringify(v, null, 2) + "\n")
-}
-
 export function readVerdict(): Promise<unknown> {
   return readJson<unknown>(verdictPath)
 }
@@ -224,24 +220,4 @@ export async function appendHistory(e: HistoryEntry): Promise<void> {
   } catch {
     /* history is advisory — never let it break a settle path */
   }
-}
-
-/** Newest-last history entries, up to `limit` from the end. Missing file → []. */
-export async function readHistory(limit = 20): Promise<HistoryEntry[]> {
-  let text: string
-  try {
-    text = await readFile(historyPath, "utf8")
-  } catch {
-    return []
-  }
-  const out: HistoryEntry[] = []
-  for (const line of text.split("\n")) {
-    if (line.trim() === "") continue
-    try {
-      out.push(JSON.parse(line) as HistoryEntry)
-    } catch {
-      /* skip torn lines */
-    }
-  }
-  return out.slice(-limit)
 }
