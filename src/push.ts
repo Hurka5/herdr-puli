@@ -41,7 +41,7 @@ export function pushRequestTool(sessionDir: string): Info {
       "Computes what WOULD be pushed (ahead/behind vs the branch's upstream, " +
       "or a new remote branch — nothing is sent yet), records the proposal in the " +
       "review queue (it may not be the only one waiting), then WAITS (up to 30 min) " +
-      "for the human to answer `puli approve` / `puli reject` in a terminal. " +
+      "for the human's verdict in the Commits panel or `puli approve` / `puli reject`. " +
       "Approved → the plugin pushes and returns the pushed refs; " +
       "rejected → returns the human's comments.",
     input: {

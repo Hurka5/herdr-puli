@@ -2,20 +2,19 @@
 
 <h3 align="center">herdr-puli</h3>
 
-<p align="center">Commit gate for OpenCode agents, reviewed in the Herdr app.<br>Agents propose. You approve, reject, or comment. Nothing commits or pushes without you.</p>
+<p align="center">Git gate for OpenCode agents, reviewed in the Herdr app.<br>Agents propose. You approve, reject, or comment.<br>No commit, push, merge or rebase happens without you.</p>
 
 ---
 
 ## How it works
 
-```
-agent ──▶ commit_request / push_request ──▶ Commits panel ──▶ approve / reject
-                                              │                    │
-                                     diff + message + files    comment on lines
-                                              │                    │
-                                              ▼                    ▼
-                                        nothing moves        agent gets
-                                        until you click      file:line notes
+```mermaid
+flowchart LR
+    A[agent] -->|commit_request<br/>push_request<br/>git_request| Q[review queue]
+    Q --> P[Commits panel<br/>diff · message · line comments]
+    P -->|approve| G[puli runs git<br/>commit / push / merge …]
+    P -->|reject + comments| A
+    G --> H[(history)]
 ```
 
 - **The gate**: `git commit` and `git push` are denied to agents. The puli plugin is the only thing that runs them — after your approval.

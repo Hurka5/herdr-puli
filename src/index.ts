@@ -43,7 +43,7 @@ export default Plugin.define({
     await ctx.tool.transform((editor) => {
       editor.namespace({
         name: "puli",
-        description: "Puli: the commit and push gate (human-approved git operations)",
+        description: "Puli: the git gate — every fenced git operation (commit, push, merge, rebase, cherry-pick, revert, plumbing) runs only after human approval",
       })
 
       editor.add({

@@ -1,7 +1,7 @@
 {
   "name": "opencode-puli",
   "version": "0.0.1",
-  "description": "Commit and push gate for OpenCode agents, reviewed in the Herdr app",
+  "description": "Human-approved git operations for OpenCode agents, reviewed in the Herdr app",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"

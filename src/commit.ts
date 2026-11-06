@@ -18,8 +18,8 @@ export function commitRequestTool(sessionDir: string): Info {
     description:
       "Propose a commit for human review (git commit is denied to you). " +
       "Stages `files` if given, records the proposed commit in the review queue (it may " +
-      "not be the only one waiting), opens the review panel, then WAITS (up to 30 min) for " +
-      "the human to answer `puli approve` / `puli reject` in a terminal. " +
+      "not be the only one waiting), notifies the human, then WAITS (up to 30 min) for " +
+      "their verdict in the Commits panel or `puli approve` / `puli reject` in a terminal. " +
       "Approved → the plugin commits and returns the hash + stat; " +
       "rejected → returns the human's change requests.",
     input: {

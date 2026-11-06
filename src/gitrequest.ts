@@ -37,10 +37,11 @@ export function gitRequestTool(sessionDir: string): Info {
   return {
     name: "git_request",
     description:
-      "Propose a FENCED git subcommand for human review (git merge / rebase / cherry-pick / " +
+      "Propose a denied git subcommand for human review (git merge / rebase / cherry-pick / " +
       "revert / commit / push / commit-tree / update-ref are denied to you). " +
       "Records the exact command in the review queue (it may not be the only one waiting), " +
-      "then WAITS (up to 30 min) for the human to answer `puli approve` / `puli reject`. " +
+      "then WAITS (up to 30 min) for the human's verdict in the Commits panel or " +
+      "`puli approve` / `puli reject`. " +
       "Approved → the plugin runs exactly that command and returns its output; " +
       "rejected → returns the human's comments. " +
       "For plain commits/pushes prefer commit_request / push_request — the reviewer sees a " +
