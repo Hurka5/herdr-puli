@@ -12,7 +12,11 @@
  *                      older proposals have none) — the accordion below
  *                      renders it, so the panel is self-sufficient: exactly
  *                      what approval will commit, without opening anything
- *                      else.
+ *                      else. A push proposal (kind: "push", remote set,
+ *                      empty files/patch) rides the same queue — the card
+ *                      shows its push line instead of a diff; so does a
+ *                      git-command proposal (kind: "git", message = the
+ *                      exact command, from the git_request tool).
  *   verdict.json       { id, decision: "approve" | "reject", message?,
  *                        comments?: [{ file, start, end, text }] } —
  *                        transient; written by `puli approve | puli reject -m`
@@ -530,7 +534,7 @@ export default class Puli extends View {
               id: p.id,
               repo: p.repo,
               branch: p.branch,
-              kind: p.kind === "push" ? "push" : "",
+              kind: p.kind === "push" || p.kind === "git" ? p.kind : "",
               remote: typeof p.remote === "string" ? p.remote : "",
               message: String(p.message ?? ""),
               stat: String(p.stat ?? ""),
@@ -1027,12 +1031,15 @@ export default class Puli extends View {
    *  header (label + total +/−), one row per changed file, the expanded
    *  inline diff under any open row. No patch (old proposals, write
    *  failures) → a "no patch captured" note instead. A push proposal
-   *  has no diff by design — just its push line. */
+   *  has no diff by design — just its push line; a git-command proposal
+   *  (kind: "git") likewise shows its command line (message = command). */
   filesSection(t, item) {
-    if (item.kind === "push") {
+    if (item.kind === "push" || item.kind === "git") {
       return v_flex().flex_none().pt(2)
         .child(div().font_family(mono()).text_size(11).text_color(t.dim)
-          .child("push: " + String(item.branch ?? "") + " → " + (item.remote || "origin")));
+          .child(item.kind === "push"
+            ? "push: " + String(item.branch ?? "") + " → " + (item.remote || "origin")
+            : String(item.message ?? "")));
     }
     const files = this.diffFiles(item);
     if (files.length === 0) {
@@ -1180,11 +1187,12 @@ export default class Puli extends View {
       .children(wrap2(subject, this.subjectChars()).map((s, i) =>
         div().id("subj-" + id + "-" + i).text_size(13).font_semibold()
           .text_color(st ? t.dim : t.foreground).child(s === "" ? "\u00a0" : s)))
-      // the FULL message, always visible (for a push: its push line)
+      // the FULL message, always visible (for a push: its push line; for
+      // a git command: the exact command)
       .child(this.well(t, "msg-" + id,
         String(item.message ?? "") === "" ? "(no message)" : String(item.message),
         st ? t.muted : t.foreground,
-        { label: item.kind === "push" ? "push" : "commit message", maxH: 320, chars: this.wellChars(), px: 0, pt: 0, bg: t.background }))
+        { label: item.kind === "push" ? "push" : item.kind === "git" ? "git command" : "commit message", maxH: 320, chars: this.wellChars(), px: 0, pt: 0, bg: t.background }))
       // meta line: repo · branch · files · age
       .child(h_flex().id("meta-" + id).gap(8).items_center()
         .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.muted)
@@ -1194,6 +1202,8 @@ export default class Puli extends View {
             (String(item.branch ?? "") !== "" ? " · " + String(item.branch) : "") +
             (item.kind === "push"
               ? " · push"
+              : item.kind === "git"
+              ? " · git"
               : " · " + item.files.length + (item.files.length === 1 ? " file" : " files"))))
         .child(div().flex_none().text_size(11).text_color(t.dim).child(age(item.createdAt))))
       // sent / answered states

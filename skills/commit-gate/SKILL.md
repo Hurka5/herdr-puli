@@ -1,6 +1,6 @@
 ---
 name: commit-gate
-description: Use whenever the task involves committing, git commit, pushing, or versioning work — commits go through the puli gate.
+description: Use whenever the task involves committing, git commit, pushing, or other fenced git commands (merge, rebase, cherry-pick, revert, plumbing) — they go through the puli gate.
 ---
 
 `git commit` / `git push` (and merge / rebase / cherry-pick / revert / plumbing
@@ -19,6 +19,15 @@ To push (`git push` is denied too): call the `push_request` tool (defaults:
 current branch → origin). The human approves it in the Commits panel like a
 commit; on approval the tool pushes and returns the pushed refs.
 
+Every other denied command — `git merge`, `git rebase`, `git cherry-pick`,
+`git revert`, plumbing like `commit-tree` / `update-ref` — goes through the
+generic `git_request` tool: pass the arguments after `git`, e.g.
+`git_request({ args: ["merge", "--no-ff", "feature"] })`. Approval runs
+exactly that command; rejection returns the human's comments. For commit and
+push keep using the dedicated `commit_request` / `push_request` tools — the
+reviewer sees the full diff there; a `git_request` card shows only the
+command line.
+
 The human reviews the diff in the herdr app's Changes panel and answers in a
 terminal — `puli approve` or `puli reject -m "comment"` — and your tool call
 returns when they do:
@@ -29,7 +38,7 @@ returns when they do:
 - timeout → the result says it timed out: tell the user the commit is still
   pending and ask them directly.
 
-Never attempt workarounds: no `--no-verify`, no plumbing commands, no
-committing or pushing via another tool or from another directory. If
-`commit_request` / `push_request` is unavailable, say so to the user instead
-of improvising.
+Never attempt workarounds: no `--no-verify`, no committing or pushing via
+another tool or from another directory. A fenced command's only path is this
+gate (`commit_request` / `push_request` / `git_request`). If the tools are
+unavailable, say so to the user instead of improvising.

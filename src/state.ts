@@ -17,7 +17,9 @@
  *                      exactly what approval will commit.
  *                      A push proposal (kind: "push", remote set, empty
  *                      files/patch) rides the same queue; the panel
- *                      shows its push line instead of a diff.
+ *                      shows its push line instead of a diff. So does a
+ *                      generic git-command proposal (kind: "git",
+ *                      message = the command) from the git_request tool.
  *   verdict.json       transient human answer, written by the herdr
  *                      panel or the `puli` CLI:
  *                      { id, decision: "approve" | "reject", message?,
@@ -48,8 +50,8 @@ export type Proposal = {
   id: string
   repo: string
   branch: string
-  /** "push" marks a push proposal (push_request); absent = commit proposal. */
-  kind?: "push"
+  /** "push" / "git" mark push / raw-command proposals; absent = commit proposal. */
+  kind?: "push" | "git"
   /** Push proposals only: the remote the branch would be pushed to. */
   remote?: string
   message: string

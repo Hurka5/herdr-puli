@@ -19,6 +19,7 @@ agent ──▶ commit_request / push_request ──▶ Commits panel ──▶ 
 ```
 
 - **The gate**: `git commit` and `git push` are denied to agents. The puli plugin is the only thing that runs them — after your approval.
+- **Full fence coverage**: every fenced git command has a gated path — `commit_request` / `push_request` for commits and pushes (with diff preview), the generic `git_request` for merge / rebase / cherry-pick / revert / plumbing.
 - **The panel**: a Commits tab in the Herdr app. Full commit message, Zed-style inline diff (hover the red markers to see removed lines), approve / reject on the card.
 - **Line comments**: click diff lines, write why they're wrong. Reject sends them to the agent as `file:line-range` references — no hand-typed line numbers.
 - **CLI**: `puli pending · show · diff · approve · reject` from any terminal.
