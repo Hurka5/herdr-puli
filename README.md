@@ -8,21 +8,9 @@
 
 ## How it works
 
-```
-agent ──▶ commit_request / push_request / git_request ──▶ review queue
-                                                              │
-                                              Commits panel ──┘
-                                           diff · message · line comments
-                                                │                │
-                                           approve           reject + comments
-                                                │                │
-                                                ▼                ▼
-                                     puli runs git          agent gets
-                                commit · push · merge      file:line notes
-                                                │
-                                                ▼
-                                             history
-```
+<p align="center"><img src="docs/flow.png" width="880" alt="agent proposes to the review queue; the Commits panel shows the diff; approve → puli runs git and records history; reject → line comments go back to the agent"></p>
+
+<sub>Diagram source: [`docs/flow.dot`](docs/flow.dot) — edit and re-render with `dot -Tpng docs/flow.dot -o docs/flow.png`.</sub>
 
 - **The gate**: `git commit` and `git push` are denied to agents. The puli plugin is the only thing that runs them — after your approval.
 - **Full fence coverage**: every fenced git command has a gated path — `commit_request` / `push_request` for commits and pushes (with diff preview), the generic `git_request` for merge / rebase / cherry-pick / revert / plumbing.

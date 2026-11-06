@@ -1,0 +1,18 @@
+digraph {
+  rankdir=LR
+  bgcolor="transparent"
+  node [shape=box, style="rounded,filled", fillcolor="#f6f6f7", color="#9aa0a6", fontname="Sans-Serif", fontsize=13, fontcolor="#1d1d1f", margin="0.18,0.12"]
+  edge [color="#5f6b7a", fontname="Sans-Serif", fontsize=11, fontcolor="#5f6b7a"]
+
+  agent   [label="agent"]
+  queue   [label="review queue"]
+  panel   [label="Commits panel\ndiff · message · line comments", fillcolor="#fdf6ec", color="#d9a566"]
+  git     [label="puli runs git\ncommit · push · merge"]
+  history [shape=ellipse, style=filled, fillcolor="#f6f6f7", label="history"]
+
+  agent -> queue [label="propose"]
+  queue -> panel [label="waits"]
+  panel -> git     [label="approve", color="#3f9e63", fontcolor="#3f9e63"]
+  panel -> agent   [label="reject + comments", color="#c2504a", fontcolor="#c2504a", constraint=false]
+  git -> history
+}
