@@ -4,7 +4,7 @@
   "description": "Human-approved git operations for OpenCode agents, reviewed in the Herdr app",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/main.ts"
   },
   "scripts": {
     "check": "tsc --noEmit"
